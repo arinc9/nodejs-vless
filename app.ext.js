@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const net = require('net');
 const crypto = require('crypto');
 const {URL} = require('url');
 const {exec} = require('child_process');
@@ -106,53 +105,7 @@ const server = createServer((req, res) => {
     }
 });
 
-/**
- * Refer to: https://xtls.github.io/development/protocols/vless.html
- * Parse the client handshake message and extract the version, target host/port and message offset
- * @param {Buffer} buf Handshake Message Buffer
- * @returns {{version:number, command:number, host:string, port:number, offset:number}}
- */
-function parseHandshake(buf) {
-    let offset = 0;
-    const version = buf.readUInt8(offset);
-    offset += 1;
-
-    // skip uuid
-    offset += 16;
-
-    const optLen = buf.readUInt8(offset);
-    offset += 1 + optLen;
-
-    const command = buf.readUInt8(offset);
-    offset += 1;
-
-    const port = buf.readUInt16BE(offset);
-    offset += 2;
-
-    const addressType = buf.readUInt8(offset);
-    offset += 1;
-
-    let host;
-    if (addressType === 1) {  // IPV4
-        host = Array.from(buf.subarray(offset, offset + 4)).join('.');
-        offset += 4;
-    } else if (addressType === 2) {  // DOMAIN
-        const len = buf.readUInt8(offset++);
-        host = buf.subarray(offset, offset + len).toString();
-        offset += len;
-    } else if (addressType === 3) {  // IPV6
-        const segments = [];
-        for (let i = 0; i < 8; i++) {
-            segments.push(buf.readUInt16BE(offset).toString(16));
-            offset += 2;
-        }
-        host = segments.join(':');
-    } else {
-        throw new Error(`Unsupported address type: ${addressType}`);
-    }
-
-    return {version, command, host, port, offset};
-}
+const {parseHandshake, relayTraffic} = require('./vless-relay');
 
 const wss = new WebSocketServer({server});
 wss.on('connection', (ws, req) => {
@@ -167,22 +120,18 @@ wss.on('connection', (ws, req) => {
 
     ws.once('message', msg => {
         try {
-            const {version, host, port, offset} = parseHandshake(msg);
-            // console.log('version: ', version, 'host: ', host, 'port: ', port, 'offset: ', offset);
+            const handshake = parseHandshake(msg);
+            // console.log('version: ', handshake.version, 'id: ', handshake.id, 'host: ', handshake.host, 'port: ', handshake.port, 'offset: ', handshake.offset);
 
-            ws.send(Buffer.from([version, 0]));
+            const uuidBuf = Buffer.from(UUID.replace(/-/g, ''), 'hex');
+            if (!handshake.id.equals(uuidBuf)) {
+                return ws.close();
+            }
+
+            ws.send(Buffer.from([handshake.version, 0]));
 
             const duplex = createWebSocketStream(ws);
-            const socket = net.connect({host, port}, () => {
-                socket.write(msg.slice(offset));
-                duplex.pipe(socket).pipe(duplex);
-            });
-
-            duplex.on('error', () => {});
-            socket.on('error', () => {});
-
-            socket.on('close', () => ws.terminate());
-            duplex.on('close', () => socket.destroy());
+            relayTraffic(duplex, handshake, msg.subarray(handshake.offset), () => ws.terminate());
 
         } catch (err) {
             // console.error('Handshake error: ', err);
