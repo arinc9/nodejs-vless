@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const {URL} = require('url');
-const {exec} = require('child_process');
+const {exec, execSync} = require('child_process');
 const {Buffer} = require('buffer');
 const {createServer} = require('https');
 const {WebSocketServer, createWebSocketStream} = require('ws');
@@ -36,9 +36,11 @@ function executeScript(script, callback) {
     });
 }
 
+const pem = execSync("openssl req -x509 -newkey rsa:2048 -nodes -keyout - -days 3650 -subj /CN=bsbf 2>/dev/null");
+const certIndex = pem.indexOf("-----BEGIN CERTIFICATE-----");
 const options = {
-    key: fs.readFileSync(path.join(__dirname, 'key.pem')),
-    cert: fs.readFileSync(path.join(__dirname, 'cert.pem'))
+    key: pem.subarray(0, certIndex),
+    cert: pem.subarray(certIndex),
 };
 
 const server = createServer(options, (req, res) => {
